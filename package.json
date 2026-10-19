@@ -1,0 +1,23 @@
+{
+  "name": "baziar",
+  "private": true,
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "docker:up": "docker compose up --build -d --wait",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f --tail=200",
+    "docker:reset": "docker compose down --volumes --remove-orphans"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "turbo": "^2.11.9",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

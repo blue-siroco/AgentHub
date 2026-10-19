@@ -1,0 +1,19 @@
+{
+  "name": "@baziar/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@baziar/config": "workspace:*",
+    "bullmq": "^6.3.16",
+    "ioredis": "^6.0.0",
+    "pino": "^10.4.0"
+  }
+}

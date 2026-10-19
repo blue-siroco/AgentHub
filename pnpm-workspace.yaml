@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+
+# `pnpm deploy` copia los paquetes del workspace (no symlinks) en las imágenes de producción.
+injectWorkspacePackages: true
+
+onlyBuiltDependencies:
+  - esbuild
+  - sharp

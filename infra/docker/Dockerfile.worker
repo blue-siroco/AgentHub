@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Imagen del worker (BullMQ). Se construye desde la raíz del repositorio:
+#   docker build -f infra/docker/Dockerfile.worker .
+
+ARG NODE_IMAGE=node:24-bookworm-slim
+
+FROM ${NODE_IMAGE} AS base
+ENV PNPM_HOME=/pnpm \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+WORKDIR /repo
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/config/package.json packages/config/
+COPY apps/api/package.json apps/api/
+COPY apps/worker/package.json apps/worker/
+COPY apps/web/package.json apps/web/
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile --filter "@baziar/worker..."
+
+FROM deps AS build
+COPY tsconfig.base.json turbo.json ./
+COPY packages/config packages/config
+COPY apps/worker apps/worker
+RUN pnpm --filter "@baziar/worker..." run build \
+ && pnpm --filter @baziar/worker deploy --prod /out
+
+FROM ${NODE_IMAGE} AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build --chown=node:node /out ./
+USER node
+CMD ["node", "dist/main.js"]

@@ -1,0 +1,189 @@
+# Entorno de referencia de Baziar (ADR 0001, sección 9).
+#   cp .env.example .env && docker compose up --build -d --wait
+# Perfiles: `frontend` (web) y `backend` (api, worker y dependencias). Todos los servicios
+# pertenecen a un perfil: COMPOSE_PROFILES (en .env) decide cuáles arrancan.
+# Los puertos publicados se limitan a 127.0.0.1; Redis, el SMTP de Mailpit y el health
+# del worker solo son accesibles dentro de la red de Compose.
+
+name: ${COMPOSE_PROJECT_NAME:-baziar}
+
+x-node-healthcheck: &node-healthcheck
+  interval: 10s
+  timeout: 3s
+  retries: 6
+  start_period: 20s
+
+x-s3-env: &s3-env
+  S3_ENDPOINT: http://localstack:4566
+  S3_REGION: ${S3_REGION:?}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?}
+  S3_BUCKET_PACKAGES: ${S3_BUCKET_PACKAGES:?}
+  S3_FORCE_PATH_STYLE: "true"
+
+services:
+  web:
+    profiles: [frontend]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+    environment:
+      API_INTERNAL_URL: http://api:3001
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+        # Permite levantar solo el perfil frontend (API externa o simulada); con ambos
+        # perfiles activos se mantiene el orden de arranque.
+        required: false
+    healthcheck:
+      <<: *node-healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    restart: unless-stopped
+
+  api:
+    profiles: [backend]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    environment:
+      <<: *s3-env
+      APP_ENV: ${APP_ENV:?}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_PORT: "3001"
+      DATABASE_URL: postgres://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+      REDIS_URL: redis://redis:6379
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      MAIL_FROM: ${MAIL_FROM:?}
+      CORS_ORIGINS: ${CORS_ORIGINS:?}
+      AUTH_DEV_EMAIL_LOGIN: ${AUTH_DEV_EMAIL_LOGIN:-false}
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    healthcheck:
+      <<: *node-healthcheck
+      # Readiness: solo se considera sano cuando PostgreSQL, Redis y el bucket responden.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    restart: unless-stopped
+
+  worker:
+    profiles: [backend]
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    environment:
+      <<: *s3-env
+      APP_ENV: ${APP_ENV:?}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+      REDIS_URL: redis://redis:6379
+      WORKER_HEALTH_PORT: "3002"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    healthcheck:
+      <<: *node-healthcheck
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+    restart: unless-stopped
+
+  postgres:
+    profiles: [backend]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+    ports:
+      # Publicado para depurar con herramientas locales (psql, DBeaver…).
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    profiles: [backend]
+    image: redis:7.4-alpine
+    # AOF para no perder jobs en un reinicio; noeviction es obligatorio para BullMQ.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  localstack:
+    profiles: [backend]
+    # Emulación local de AWS, limitada a S3. Desde 2026.03 la imagen exige LOCALSTACK_AUTH_TOKEN
+    # para arrancar (ver README). Solo para desarrollo y test local.
+    image: localstack/localstack:2026.10.0
+    environment:
+      # Solo lo que necesita el init hook; el resto de S3_* no se pasa para no colisionar con
+      # la configuración propia de LocalStack.
+      S3_REGION: ${S3_REGION:?}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?}
+      S3_BUCKET_PACKAGES: ${S3_BUCKET_PACKAGES:?}
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?Define LOCALSTACK_AUTH_TOKEN en .env (ver README)}
+      SERVICES: s3
+      # La persistencia entre reinicios solo está en los planes de pago de LocalStack; sin ella,
+      # el init hook recrea el bucket (vacío) en cada arranque.
+      PERSISTENCE: ${LOCALSTACK_PERSISTENCE:-0}
+    ports:
+      # Solo el gateway de AWS (la CLI del host descargará de aquí).
+      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - ./infra/docker/localstack/ready.d:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # Sano solo cuando la etapa READY (creación del bucket) ha terminado sin errores.
+      # La imagen no incluye curl; se usa su Python con la biblioteca estándar.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,sys,urllib.request as u; r=json.load(u.build_opener(u.ProxyHandler({})).open('http://localhost:4566/_localstack/init/ready',timeout=2)); sys.exit(0 if r.get('completed') and all(s.get('state')!='ERROR' for s in r.get('scripts',[])) else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  mailpit:
+    profiles: [backend]
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_HOST_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  localstack-data:
